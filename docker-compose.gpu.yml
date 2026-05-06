@@ -1,0 +1,40 @@
+# =============================================================
+# docker-compose.gpu.yml — GPU override
+# =============================================================
+# Applied automatically by ./cvat-sam2 when NVIDIA GPU support
+# is detected. Adds nvidia runtime / GPU reservations.
+# =============================================================
+
+services:
+  sam2:
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      SAM2_DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  onnx_runner:
+    build:
+      context: ./services/onnx-runner
+      dockerfile: Dockerfile
+      args:
+        ONNX_RUNTIME_PKG: "onnxruntime-gpu>=1.17.0"
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      ONNX_DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

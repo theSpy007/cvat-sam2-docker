@@ -1,0 +1,11 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+numpy>=1.24.0
+opencv-python-headless>=4.9.0
+Pillow>=10.0.0
+# SAM2 from Meta (Hugging Face transformers approach)
+transformers>=4.40.0
+# torch / torchvision are provided by the base image
+# (pytorch/pytorch), so we don't pin them here to avoid conflicts
+accelerate>=0.29.0
+huggingface_hub>=0.23.0

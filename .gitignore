@@ -1,0 +1,67 @@
+# =============================================================
+# cvat-sam2 .gitignore
+# =============================================================
+
+# Environment / secrets
+.env
+*.env.local
+
+# Model weights (can be huge — never commit)
+models/**/*.onnx
+models/**/*.pt
+models/**/*.pth
+models/**/*.bin
+models/**/*.safetensors
+models/**/*.pkl
+models/**/*.engine
+models/**/*.trt
+services/sam2/weights/
+services/sam2/.cache/
+*.onnx
+*.pt
+*.pth
+
+# SAM2 model cache
+sam2_cache/
+.cache/
+
+# Docker volumes
+volumes/
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+env/
+.python-version
+
+# Logs
+logs/
+*.log
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Temp
+tmp/
+temp/
+
+# Generated
+compose/.env

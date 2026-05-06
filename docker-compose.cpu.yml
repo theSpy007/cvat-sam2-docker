@@ -1,0 +1,14 @@
+# =============================================================
+# docker-compose.cpu.yml — CPU-explicit override
+# =============================================================
+# Applied when GPU is unavailable. Forces all services to CPU.
+# =============================================================
+
+services:
+  sam2:
+    environment:
+      SAM2_DEVICE: cpu
+
+  onnx_runner:
+    environment:
+      ONNX_DEVICE: cpu

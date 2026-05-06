@@ -1,0 +1,483 @@
+#!/usr/bin/env bash
+# =============================================================
+# cvat-sam2 — Top-level CLI for the CVAT + SAM2 local stack
+# =============================================================
+# Usage: ./cvat-sam2 <command> [options]
+#
+# Run ./cvat-sam2 help for full command reference.
+# =============================================================
+
+set -euo pipefail
+
+# ------------------------------------------------------------------
+# Script / repo paths
+# ------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${SCRIPT_DIR}"
+
+# Bring in helper scripts
+SCRIPTS_DIR="${REPO_ROOT}/scripts"
+
+# Compose project name
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-cvat-sam2}"
+
+# Base compose file list (always included)
+BASE_COMPOSE_FILES=(
+    "-f" "${REPO_ROOT}/docker-compose.yml"
+)
+
+# ------------------------------------------------------------------
+# Logging helpers
+# ------------------------------------------------------------------
+LOG_PREFIX="[cvat-sam2]"
+
+info()    { echo "${LOG_PREFIX} INFO    $*"; }
+warn()    { echo "${LOG_PREFIX} WARNING $*" >&2; }
+error()   { echo "${LOG_PREFIX} ERROR   $*" >&2; }
+success() { echo "${LOG_PREFIX} OK      $*"; }
+die()     { error "$*"; exit 1; }
+
+# ------------------------------------------------------------------
+# Prerequisites check
+# ------------------------------------------------------------------
+check_docker() {
+    if ! command -v docker &>/dev/null; then
+        die "Docker is not installed or not in PATH.\n  Install: https://docs.docker.com/get-docker/"
+    fi
+    if ! docker info &>/dev/null; then
+        die "Docker daemon is not running or current user cannot access it.\n  Try: sudo systemctl start docker\n  Or add your user to the docker group: sudo usermod -aG docker \$USER"
+    fi
+}
+
+check_docker_compose() {
+    # Prefer 'docker compose' (plugin) over 'docker-compose' (standalone)
+    if docker compose version &>/dev/null 2>&1; then
+        DOCKER_COMPOSE="docker compose"
+    elif command -v docker-compose &>/dev/null; then
+        DOCKER_COMPOSE="docker-compose"
+    else
+        die "Docker Compose is not available.\n  Install: https://docs.docker.com/compose/install/"
+    fi
+}
+
+# ------------------------------------------------------------------
+# GPU detection
+# ------------------------------------------------------------------
+detect_gpu() {
+    GPU_AVAILABLE=false
+
+    # First check: nvidia-smi on the host
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null 2>&1; then
+        # Second check: Docker can actually use the GPU
+        if docker run --rm --gpus all nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi &>/dev/null 2>&1; then
+            GPU_AVAILABLE=true
+            info "NVIDIA GPU detected and Docker GPU access verified."
+            return
+        else
+            warn "NVIDIA GPU found via nvidia-smi but Docker cannot access it."
+            warn "  Ensure NVIDIA Container Toolkit is installed:"
+            warn "  https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
+        fi
+    fi
+
+    if [ "${GPU_AVAILABLE}" = "false" ]; then
+        warn "No usable NVIDIA GPU found. Starting in CPU mode."
+        warn "  SAM2 on CPU is significantly slower than on GPU."
+    fi
+}
+
+# ------------------------------------------------------------------
+# Compose file selector
+# ------------------------------------------------------------------
+build_compose_args() {
+    # Always include base
+    COMPOSE_ARGS=("${BASE_COMPOSE_FILES[@]}")
+
+    detect_gpu
+
+    if [ "${GPU_AVAILABLE}" = "true" ]; then
+        COMPOSE_ARGS+=("-f" "${REPO_ROOT}/docker-compose.gpu.yml")
+        info "GPU compose override applied (docker-compose.gpu.yml)."
+    else
+        COMPOSE_ARGS+=("-f" "${REPO_ROOT}/docker-compose.cpu.yml")
+        info "CPU compose override applied (docker-compose.cpu.yml)."
+    fi
+}
+
+# ------------------------------------------------------------------
+# Environment setup
+# ------------------------------------------------------------------
+ensure_env() {
+    if [ ! -f "${REPO_ROOT}/.env" ]; then
+        info "No .env found — creating from .env.example ..."
+        cp "${REPO_ROOT}/.env.example" "${REPO_ROOT}/.env"
+        warn "Default credentials are in use. Edit .env before exposing to a network."
+    fi
+}
+
+ensure_dirs() {
+    local dirs=(
+        "${REPO_ROOT}/models"
+        "${REPO_ROOT}/logs"
+    )
+    for d in "${dirs[@]}"; do
+        if [ ! -d "${d}" ]; then
+            mkdir -p "${d}"
+            info "Created directory: ${d}"
+        fi
+    done
+}
+
+# ------------------------------------------------------------------
+# Run docker compose with project name and env file
+# ------------------------------------------------------------------
+run_compose() {
+    ${DOCKER_COMPOSE} \
+        --project-name "${COMPOSE_PROJECT_NAME}" \
+        --env-file "${REPO_ROOT}/.env" \
+        "${COMPOSE_ARGS[@]}" \
+        "$@"
+}
+
+# ------------------------------------------------------------------
+# Command: up
+# ------------------------------------------------------------------
+cmd_up() {
+    info "Starting CVAT + SAM2 stack ..."
+    ensure_env
+    ensure_dirs
+    check_docker
+    check_docker_compose
+    build_compose_args
+
+    info "Building service images (first run may take several minutes) ..."
+    run_compose build --parallel
+
+    info "Starting containers ..."
+    run_compose up -d --remove-orphans
+
+    # Wait for CVAT to be healthy
+    info "Waiting for CVAT to become healthy (this can take ~2 minutes on first start) ..."
+    local retries=40
+    local count=0
+    while [ "${count}" -lt "${retries}" ]; do
+        if run_compose ps cvat_server 2>/dev/null | grep -q "healthy"; then
+            break
+        fi
+        sleep 5
+        count=$((count + 1))
+        echo -n "."
+    done
+    echo ""
+
+    if ! run_compose ps cvat_server 2>/dev/null | grep -q "healthy"; then
+        warn "CVAT did not reach healthy status within expected time."
+        warn "Check logs with: ./cvat-sam2 logs"
+    else
+        success "CVAT is running."
+    fi
+
+    # Create superuser if this looks like the first run
+    cmd_create_superuser || true
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  CVAT is available at: http://localhost:${CVAT_PORT:-8080}"
+    echo "  SAM2 service:         http://localhost:${SAM2_PORT:-8000}"
+    echo "  ONNX runner:          http://localhost:${ONNX_PORT:-8001}"
+    echo ""
+    echo "  Login with the credentials in your .env file."
+    echo "  See README.md for how to use SAM2 assisted annotation."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+# ------------------------------------------------------------------
+# Create CVAT superuser (idempotent)
+# ------------------------------------------------------------------
+cmd_create_superuser() {
+    # Load env vars from .env
+    local email pass
+    email=$(grep '^CVAT_SUPERUSER_EMAIL=' "${REPO_ROOT}/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"')
+    pass=$(grep '^CVAT_SUPERUSER_PASS=' "${REPO_ROOT}/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"')
+
+    email="${email:-admin@example.com}"
+    pass="${pass:-ChangeMeNow123!}"
+
+    info "Ensuring CVAT superuser exists (${email}) ..."
+    run_compose exec -T cvat_server python manage.py createsuperuser \
+        --noinput \
+        --username "$(echo "${email}" | cut -d@ -f1)" \
+        --email "${email}" \
+        2>/dev/null || true
+
+    # Set password (createsuperuser --noinput uses DJANGO_SUPERUSER_PASSWORD)
+    run_compose exec -T cvat_server bash -c "
+        echo \"from django.contrib.auth.models import User; u = User.objects.filter(email='${email}').first()
+if u:
+    u.set_password('${pass}')
+    u.save()
+\" | python manage.py shell" 2>/dev/null || true
+}
+
+# ------------------------------------------------------------------
+# Command: down
+# ------------------------------------------------------------------
+cmd_down() {
+    info "Stopping CVAT + SAM2 stack ..."
+    check_docker
+    check_docker_compose
+    build_compose_args
+    run_compose down
+    success "Stack stopped."
+}
+
+# ------------------------------------------------------------------
+# Command: restart
+# ------------------------------------------------------------------
+cmd_restart() {
+    cmd_down
+    cmd_up
+}
+
+# ------------------------------------------------------------------
+# Command: status
+# ------------------------------------------------------------------
+cmd_status() {
+    check_docker
+    check_docker_compose
+    build_compose_args
+    echo ""
+    run_compose ps
+    echo ""
+    # Quick GPU summary
+    detect_gpu || true
+    if [ "${GPU_AVAILABLE}" = "true" ]; then
+        success "GPU mode active"
+    else
+        warn "CPU mode active (no GPU)"
+    fi
+}
+
+# ------------------------------------------------------------------
+# Command: logs
+# ------------------------------------------------------------------
+cmd_logs() {
+    check_docker
+    check_docker_compose
+    build_compose_args
+    local service="${1:-}"
+    if [ -n "${service}" ]; then
+        run_compose logs --follow --tail=100 "${service}"
+    else
+        run_compose logs --follow --tail=50
+    fi
+}
+
+# ------------------------------------------------------------------
+# Command: doctor
+# ------------------------------------------------------------------
+cmd_doctor() {
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  cvat-sam2 doctor — system check"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    bash "${SCRIPTS_DIR}/doctor.sh"
+}
+
+# ------------------------------------------------------------------
+# Command: clean
+# ------------------------------------------------------------------
+cmd_clean() {
+    echo ""
+    warn "This will REMOVE all containers, volumes, and data. This cannot be undone."
+    read -r -p "Type 'yes' to confirm: " confirm
+    if [ "${confirm}" != "yes" ]; then
+        echo "Aborted."
+        return 0
+    fi
+
+    check_docker
+    check_docker_compose
+    build_compose_args
+
+    info "Stopping and removing containers + volumes ..."
+    run_compose down --volumes --remove-orphans
+    success "All containers and volumes removed."
+    info "To remove built images as well, run: docker image rm cvat-sam2/sam2:latest cvat-sam2/onnx-runner:latest"
+}
+
+# ------------------------------------------------------------------
+# Command: models list
+# ------------------------------------------------------------------
+cmd_models_list() {
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Registered ONNX models in: ${REPO_ROOT}/models/"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    local found=false
+    for model_dir in "${REPO_ROOT}/models"/*/; do
+        [ -d "${model_dir}" ] || continue
+        local model_name
+        model_name="$(basename "${model_dir}")"
+        local config="${model_dir}model.yaml"
+        if [ -f "${config}" ]; then
+            local task_type version
+            task_type=$(grep '^task_type:' "${config}" 2>/dev/null | awk '{print $2}' || echo "unknown")
+            version=$(grep '^version:' "${config}" 2>/dev/null | awk '{print $2}' || echo "unknown")
+            local onnx_status="[no .onnx file]"
+            if ls "${model_dir}"*.onnx &>/dev/null 2>&1; then
+                onnx_status="[weight found]"
+            fi
+            echo "  - ${model_name}  task=${task_type}  version=${version}  ${onnx_status}"
+            found=true
+        else
+            echo "  - ${model_name}  [WARNING: no model.yaml]"
+            found=true
+        fi
+    done
+    if [ "${found}" = "false" ]; then
+        echo "  (no models found)"
+        echo ""
+        echo "  Add a model by creating: models/<name>/model.yaml"
+        echo "  See docs/models.md for instructions."
+    fi
+    echo ""
+}
+
+# ------------------------------------------------------------------
+# Command: models validate
+# ------------------------------------------------------------------
+cmd_models_validate() {
+    echo ""
+    info "Validating model configs in ${REPO_ROOT}/models/ ..."
+    python3 "${SCRIPTS_DIR}/validate_models.py" "${REPO_ROOT}/models"
+}
+
+# ------------------------------------------------------------------
+# Command: annotate (task auto-annotation via ONNX runner)
+# ------------------------------------------------------------------
+cmd_annotate() {
+    local task_id=""
+    local model_name=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --task) task_id="$2"; shift 2 ;;
+            --model) model_name="$2"; shift 2 ;;
+            *) die "Unknown option: $1. Usage: ./cvat-sam2 annotate --task <id> --model <name>" ;;
+        esac
+    done
+
+    [ -n "${task_id}" ]   || die "Missing --task <id>"
+    [ -n "${model_name}" ] || die "Missing --model <name>"
+
+    local email pass
+    email=$(grep '^CVAT_SUPERUSER_EMAIL=' "${REPO_ROOT}/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"')
+    pass=$(grep  '^CVAT_SUPERUSER_PASS='  "${REPO_ROOT}/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"')
+
+    info "Submitting auto-annotation request: task=${task_id} model=${model_name}"
+
+    python3 "${SCRIPTS_DIR}/annotate.py" \
+        --task "${task_id}" \
+        --model "${model_name}" \
+        --cvat-url "http://localhost:${CVAT_PORT:-8080}" \
+        --cvat-user "${email}" \
+        --cvat-pass "${pass}" \
+        --onnx-url  "http://localhost:${ONNX_PORT:-8001}"
+}
+
+# ------------------------------------------------------------------
+# Usage / help
+# ------------------------------------------------------------------
+cmd_help() {
+    cat <<'EOF'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  cvat-sam2 — CVAT + SAM2 local stack
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+USAGE:
+  ./cvat-sam2 <command> [arguments]
+
+STACK COMMANDS:
+  up                 Build images and start the full stack
+  down               Stop and remove containers
+  restart            Stop then start the stack
+  status             Show container status and GPU info
+  logs [service]     Tail logs (all services, or a specific one)
+  clean              Remove containers, volumes, and ALL data (destructive)
+
+DIAGNOSTIC COMMANDS:
+  doctor             Check Docker, GPU, ports, dirs, and model configs
+
+MODEL COMMANDS:
+  models list        List all models in the models/ directory
+  models validate    Validate all model.yaml config files
+
+ANNOTATION COMMANDS:
+  annotate --task <id> --model <name>
+                     Auto-annotate a CVAT task using an ONNX model
+
+GENERAL:
+  help               Show this help message
+
+EXAMPLES:
+  ./cvat-sam2 up
+  ./cvat-sam2 logs sam2
+  ./cvat-sam2 models validate
+  ./cvat-sam2 annotate --task 42 --model example-segmentation
+  ./cvat-sam2 down
+
+CONFIGURATION:
+  Edit .env to change ports, credentials, and model settings.
+  See docs/ for full documentation.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EOF
+}
+
+# ------------------------------------------------------------------
+# Load .env into the current shell so port variables are available
+# ------------------------------------------------------------------
+load_env() {
+    if [ -f "${REPO_ROOT}/.env" ]; then
+        set -o allexport
+        # shellcheck disable=SC1090
+        source "${REPO_ROOT}/.env"
+        set +o allexport
+    fi
+}
+
+# ------------------------------------------------------------------
+# Main dispatcher
+# ------------------------------------------------------------------
+main() {
+    load_env
+
+    local cmd="${1:-help}"
+    shift || true
+
+    case "${cmd}" in
+        up)               cmd_up ;;
+        down)             cmd_down ;;
+        restart)          cmd_restart ;;
+        status)           cmd_status ;;
+        logs)             cmd_logs "$@" ;;
+        doctor)           cmd_doctor ;;
+        clean)            cmd_clean ;;
+        models)
+            local sub="${1:-list}"
+            shift || true
+            case "${sub}" in
+                list)     cmd_models_list ;;
+                validate) cmd_models_validate ;;
+                *)        die "Unknown models subcommand: ${sub}. Use 'list' or 'validate'." ;;
+            esac
+            ;;
+        annotate)         cmd_annotate "$@" ;;
+        help|--help|-h)   cmd_help ;;
+        *)                error "Unknown command: ${cmd}"; cmd_help; exit 1 ;;
+    esac
+}
+
+main "$@"

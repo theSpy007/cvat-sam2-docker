@@ -1,0 +1,260 @@
+# =============================================================
+# docker-compose.yml — Base CVAT + SAM2 + ONNX runner stack
+# =============================================================
+# This is the primary compose file. Additional override files
+# are applied by the ./cvat-sam2 CLI script:
+#   docker-compose.gpu.yml  — adds GPU resources
+#   docker-compose.serverless.yml — adds Nuclio serverless
+#
+# Do NOT run docker compose directly; use ./cvat-sam2 instead.
+# =============================================================
+
+x-restart-policy: &restart_policy
+  restart: unless-stopped
+
+x-log-opts: &log_opts
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  # -----------------------------------------------------------
+  # PostgreSQL database for CVAT
+  # -----------------------------------------------------------
+  cvat_db:
+    image: postgres:15-alpine
+    <<: [*restart_policy, *log_opts]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cvat}
+      POSTGRES_USER: ${POSTGRES_USER:-root}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cvat_db_password_change_me}
+    volumes:
+      - cvat_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-root} -d ${POSTGRES_DB:-cvat}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cvat_network
+
+  # -----------------------------------------------------------
+  # Redis — cache/queue for CVAT
+  # -----------------------------------------------------------
+  cvat_redis_inmem:
+    image: redis:7-alpine
+    <<: [*restart_policy, *log_opts]
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cvat_network
+
+  cvat_redis_ondisk:
+    image: redis:7-alpine
+    <<: [*restart_policy, *log_opts]
+    command: redis-server --appendonly yes
+    volumes:
+      - cvat_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cvat_network
+
+  # -----------------------------------------------------------
+  # CVAT server (Django)
+  # -----------------------------------------------------------
+  cvat_server:
+    image: cvat/server:${CVAT_VERSION:-v2.20.0}
+    <<: [*restart_policy, *log_opts]
+    depends_on:
+      cvat_db:
+        condition: service_healthy
+      cvat_redis_inmem:
+        condition: service_healthy
+      cvat_redis_ondisk:
+        condition: service_healthy
+    environment:
+      DJANGO_MODWSGI_EXTRA_ARGS: ""
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: "6379"
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: "6379"
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_POSTGRES_DBNAME: ${POSTGRES_DB:-cvat}
+      CVAT_POSTGRES_USER: ${POSTGRES_USER:-root}
+      CVAT_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cvat_db_password_change_me}
+      # SAM2 integration — points to our SAM2 service
+      SAM2_HOST: sam2
+      SAM2_PORT: ${SAM2_PORT:-8000}
+      ONNX_RUNNER_HOST: onnx_runner
+      ONNX_RUNNER_PORT: ${ONNX_PORT:-8001}
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+    networks:
+      - cvat_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/api/server/about || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # -----------------------------------------------------------
+  # CVAT worker — general purpose
+  # -----------------------------------------------------------
+  cvat_worker_general:
+    image: cvat/server:${CVAT_VERSION:-v2.20.0}
+    <<: [*restart_policy, *log_opts]
+    depends_on:
+      cvat_server:
+        condition: service_healthy
+    command: run worker.general
+    environment:
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: "6379"
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: "6379"
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_POSTGRES_DBNAME: ${POSTGRES_DB:-cvat}
+      CVAT_POSTGRES_USER: ${POSTGRES_USER:-root}
+      CVAT_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cvat_db_password_change_me}
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+    networks:
+      - cvat_network
+
+  # -----------------------------------------------------------
+  # CVAT worker — annotation
+  # -----------------------------------------------------------
+  cvat_worker_annotation:
+    image: cvat/server:${CVAT_VERSION:-v2.20.0}
+    <<: [*restart_policy, *log_opts]
+    depends_on:
+      cvat_server:
+        condition: service_healthy
+    command: run worker.annotation
+    environment:
+      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+      CVAT_REDIS_INMEM_PORT: "6379"
+      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+      CVAT_REDIS_ONDISK_PORT: "6379"
+      CVAT_POSTGRES_HOST: cvat_db
+      CVAT_POSTGRES_DBNAME: ${POSTGRES_DB:-cvat}
+      CVAT_POSTGRES_USER: ${POSTGRES_USER:-root}
+      CVAT_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cvat_db_password_change_me}
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+    networks:
+      - cvat_network
+
+  # -----------------------------------------------------------
+  # CVAT UI (React frontend served by Nginx)
+  # -----------------------------------------------------------
+  cvat_ui:
+    image: cvat/ui:${CVAT_VERSION:-v2.20.0}
+    <<: [*restart_policy, *log_opts]
+    depends_on:
+      - cvat_server
+    networks:
+      - cvat_network
+
+  # -----------------------------------------------------------
+  # Nginx reverse proxy — exposes CVAT on host port
+  # -----------------------------------------------------------
+  cvat_proxy:
+    image: nginx:1.25-alpine
+    <<: [*restart_policy, *log_opts]
+    depends_on:
+      - cvat_server
+      - cvat_ui
+    ports:
+      - "127.0.0.1:${CVAT_PORT:-8080}:80"
+    volumes:
+      - ./compose/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - cvat_network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/api/server/about || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  # -----------------------------------------------------------
+  # SAM2 assisted annotation service
+  # -----------------------------------------------------------
+  sam2:
+    build:
+      context: ./services/sam2
+      dockerfile: Dockerfile
+    image: cvat-sam2/sam2:latest
+    <<: [*restart_policy, *log_opts]
+    environment:
+      SAM2_MODEL_ID: ${SAM2_MODEL_ID:-large}
+      SAM2_DEVICE: ${SAM2_DEVICE:-auto}
+      SAM2_MODEL_CACHE: ${SAM2_MODEL_CACHE:-/models/sam2_cache}
+    volumes:
+      - sam2_model_cache:/models/sam2_cache
+    ports:
+      - "127.0.0.1:${SAM2_PORT:-8000}:8000"
+    networks:
+      - cvat_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 120s
+
+  # -----------------------------------------------------------
+  # ONNX model runner for custom segmentation models
+  # -----------------------------------------------------------
+  onnx_runner:
+    build:
+      context: ./services/onnx-runner
+      dockerfile: Dockerfile
+    image: cvat-sam2/onnx-runner:latest
+    <<: [*restart_policy, *log_opts]
+    environment:
+      ONNX_DEVICE: ${ONNX_DEVICE:-auto}
+      ONNX_MODELS_DIR: ${ONNX_MODELS_DIR:-/models/user}
+    volumes:
+      - ./models:/models/user:ro
+    ports:
+      - "127.0.0.1:${ONNX_PORT:-8001}:8001"
+    networks:
+      - cvat_network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  cvat_db_data:
+  cvat_redis_data:
+  cvat_data:
+  cvat_keys:
+  cvat_logs:
+  sam2_model_cache:
+
+networks:
+  cvat_network:
+    driver: bridge

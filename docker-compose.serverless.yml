@@ -1,0 +1,30 @@
+# =============================================================
+# docker-compose.serverless.yml — Nuclio serverless platform
+# =============================================================
+# Optional: enables Nuclio for CVAT serverless auto-annotation
+# functions. Applied when SAM2 or ONNX serverless functions
+# are deployed via nuctl.
+#
+# NOTE: The ./cvat-sam2 CLI deploys functions using a Nuclio
+# CLI container so no host-level nuctl installation is needed.
+# =============================================================
+
+services:
+  nuclio:
+    image: quay.io/nuclio/dashboard:1.13.0-amd64
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${NUCLIO_PORT:-8070}:8070"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - nuclio_config:/etc/nuclio/config
+    environment:
+      NUCLIO_CHECK_FUNCTION_CONTAINERS_HEALTHINESS: "true"
+    networks:
+      - cvat_network
+
+volumes:
+  nuclio_config:
+
+networks:
+  cvat_network:

@@ -1,0 +1,118 @@
+name: validate
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  # Shell script syntax validation
+  # ──────────────────────────────────────────────────────────
+  shellcheck:
+    name: Shell lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Check cvat-sam2 entrypoint
+        run: shellcheck cvat-sam2
+
+      - name: Check scripts/
+        run: shellcheck scripts/doctor.sh scripts/detect-gpu.sh scripts/wait-for-health.sh
+
+  # ──────────────────────────────────────────────────────────
+  # YAML syntax validation
+  # ──────────────────────────────────────────────────────────
+  yaml-lint:
+    name: YAML lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Lint YAML files
+        run: |
+          yamllint -d relaxed \
+            docker-compose.yml \
+            docker-compose.gpu.yml \
+            docker-compose.cpu.yml \
+            docker-compose.serverless.yml \
+            models/example-segmentation/model.yaml \
+            .github/workflows/validate.yml
+
+  # ──────────────────────────────────────────────────────────
+  # Model config schema validation
+  # ──────────────────────────────────────────────────────────
+  model-validate:
+    name: Model config validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install pydantic>=2.0 PyYAML
+
+      - name: Validate model configs
+        run: python3 scripts/validate_models.py models/
+
+  # ──────────────────────────────────────────────────────────
+  # Python import / syntax check for service code
+  # ──────────────────────────────────────────────────────────
+  python-syntax:
+    name: Python syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install minimal deps
+        run: pip install pydantic>=2.0 PyYAML
+
+      - name: Syntax check services/onnx-runner
+        working-directory: services/onnx-runner
+        run: python -m py_compile schema.py registry.py app.py
+
+      - name: Syntax check services/sam2
+        working-directory: services/sam2
+        run: python -m py_compile app.py
+
+      - name: Syntax check scripts
+        run: python -m py_compile scripts/validate_models.py scripts/annotate.py
+
+  # ──────────────────────────────────────────────────────────
+  # Docker Compose config validation (no build)
+  # ──────────────────────────────────────────────────────────
+  compose-config:
+    name: Docker Compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env from example
+        run: cp .env.example .env
+
+      - name: Validate base compose file
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: Validate CPU override
+        run: docker compose -f docker-compose.yml -f docker-compose.cpu.yml config --quiet
+
+      - name: Validate serverless overlay
+        run: docker compose -f docker-compose.yml -f docker-compose.cpu.yml -f docker-compose.serverless.yml config --quiet
