@@ -3,8 +3,10 @@ uvicorn[standard]>=0.29.0
 numpy>=1.24.0
 opencv-python-headless>=4.9.0
 Pillow>=10.0.0
-# SAM2 from Meta (Hugging Face transformers approach)
-transformers>=4.40.0
+# SAM2 via HuggingFace transformers 4.47 (first release with Sam2ImageProcessor).
+# Pin below 5.x — transformers 5.x requires PyTorch>=2.4 but the base image
+# ships PyTorch 2.3.0 and upgrading via pip conflicts with the conda install.
+transformers>=4.47.0,<5.0.0
 # torch / torchvision are provided by the base image
 # (pytorch/pytorch), so we don't pin them here to avoid conflicts
 accelerate>=0.29.0

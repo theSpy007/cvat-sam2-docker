@@ -98,7 +98,10 @@ def load_model():
     start = time.time()
 
     try:
-        from transformers import AutoProcessor, AutoModelForMaskGeneration
+        # Use Sam2ImageProcessorFast directly — the "Fast" variant is what
+        # transformers >=4.47 exports (Sam2ImageProcessor was renamed).
+        # AutoProcessor may resolve to Sam2VideoProcessor which is undesired.
+        from transformers import Sam2ImageProcessorFast, Sam2Model
         import torch
 
         _device = resolve_device()
@@ -106,11 +109,11 @@ def load_model():
         cache_dir = Path(MODEL_CACHE)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        _processor = AutoProcessor.from_pretrained(
+        _processor = Sam2ImageProcessorFast.from_pretrained(
             HF_MODEL_ID,
             cache_dir=str(cache_dir),
         )
-        _model = AutoModelForMaskGeneration.from_pretrained(
+        _model = Sam2Model.from_pretrained(
             HF_MODEL_ID,
             cache_dir=str(cache_dir),
         ).to(_device)

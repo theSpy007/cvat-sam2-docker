@@ -22,9 +22,15 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
+
+# Install torchvision via conda to stay in the existing CUDA environment
+# (avoids pip reinstalling CUDA-less torch on top of conda's CUDA torch)
+RUN conda install -y -c pytorch -c nvidia torchvision \
+    --no-update-deps --override-channels \
+    && conda clean -afy
 
 WORKDIR /app
 

@@ -54,8 +54,16 @@
 ### cvat_redis_inmem / cvat_redis_ondisk
 - In-memory cache and on-disk queue for CVAT workers.
 
-### cvat_worker_general / cvat_worker_annotation
-- Background workers handling CVAT tasks (export, import, annotation jobs).
+### cvat_server_init (one-shot migration)
+- Runs `manage.py migrate` on first start, then exits cleanly.
+- `cvat_server` waits for this to complete (`service_completed_successfully`).
+
+### opa (Open Policy Agent)
+- Lightweight IAM authorization engine required by CVAT.
+- Downloads policy bundle from `cvat_server` on startup.
+
+### cvat_worker_utils / cvat_worker_annotation / cvat_worker_export / cvat_worker_import
+- Background workers handling CVAT tasks (scheduling, export, import, annotation jobs).
 
 ### sam2 (SAM2 Service)
 - **FastAPI** application wrapping Segment Anything 2.

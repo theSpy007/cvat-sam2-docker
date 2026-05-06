@@ -156,17 +156,20 @@ cmd_up() {
     info "Starting containers ..."
     run_compose up -d --remove-orphans
 
-    # Wait for CVAT to be healthy
-    info "Waiting for CVAT to become healthy (this can take ~2 minutes on first start) ..."
-    local retries=40
+    # Wait for CVAT server to be healthy (first run requires DB migrations)
+    info "Waiting for CVAT to become healthy (first run may take ~3 minutes for DB migrations) ..."
+    local retries=60
     local count=0
     while [ "${count}" -lt "${retries}" ]; do
-        if run_compose ps cvat_server 2>/dev/null | grep -q "healthy"; then
+        local server_status
+        server_status=$(run_compose ps --format json cvat_server 2>/dev/null \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('Health','') if isinstance(d,dict) else [x.get('Health','') for x in d][0])" 2>/dev/null || true)
+        if [ "${server_status}" = "healthy" ]; then
             break
         fi
         sleep 5
         count=$((count + 1))
-        echo -n "."
+        printf "."
     done
     echo ""
 

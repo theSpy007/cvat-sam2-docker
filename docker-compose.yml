@@ -19,6 +19,25 @@ x-log-opts: &log_opts
       max-size: "20m"
       max-file: "5"
 
+# Shared CVAT environment — used by server and all workers
+x-cvat-env: &cvat_env
+  DJANGO_MODWSGI_EXTRA_ARGS: ""
+  # Explicit list + wildcard — handles both internal Docker DNS and browser
+  ALLOWED_HOSTS: "localhost,cvat-server,cvat_server,*"
+  CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
+  CVAT_REDIS_INMEM_PORT: "6379"
+  CVAT_REDIS_INMEM_PASSWORD: ""
+  CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
+  CVAT_REDIS_ONDISK_PORT: "6379"
+  CVAT_POSTGRES_HOST: cvat_db
+  CVAT_POSTGRES_DBNAME: ${POSTGRES_DB:-cvat}
+  CVAT_POSTGRES_USER: ${POSTGRES_USER:-root}
+  CVAT_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cvat_db_password_change_me}
+  NUMPROCS: 1
+  SMOKESCREEN_OPTS: ""
+  IAM_OPA_HOST: "http://opa:8181"
+  IAM_OPA_BUNDLE: "1"
+
 services:
   # -----------------------------------------------------------
   # PostgreSQL database for CVAT
@@ -71,11 +90,13 @@ services:
       - cvat_network
 
   # -----------------------------------------------------------
-  # CVAT server (Django)
+  # One-time migration init — runs `manage.py migrate` and exits
+  # cvat_server waits for this to complete successfully
   # -----------------------------------------------------------
-  cvat_server:
+  cvat_server_init:
     image: cvat/server:${CVAT_VERSION:-v2.20.0}
-    <<: [*restart_policy, *log_opts]
+    command: init
+    restart: "no"
     depends_on:
       cvat_db:
         condition: service_healthy
@@ -84,52 +105,80 @@ services:
       cvat_redis_ondisk:
         condition: service_healthy
     environment:
-      DJANGO_MODWSGI_EXTRA_ARGS: ""
-      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
-      CVAT_REDIS_INMEM_PORT: "6379"
-      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
-      CVAT_REDIS_ONDISK_PORT: "6379"
-      CVAT_POSTGRES_HOST: cvat_db
-      CVAT_POSTGRES_DBNAME: ${POSTGRES_DB:-cvat}
-      CVAT_POSTGRES_USER: ${POSTGRES_USER:-root}
-      CVAT_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cvat_db_password_change_me}
-      # SAM2 integration — points to our SAM2 service
-      SAM2_HOST: sam2
-      SAM2_PORT: ${SAM2_PORT:-8000}
-      ONNX_RUNNER_HOST: onnx_runner
-      ONNX_RUNNER_PORT: ${ONNX_PORT:-8001}
+      <<: *cvat_env
     volumes:
       - cvat_data:/home/django/data
       - cvat_keys:/home/django/keys
       - cvat_logs:/home/django/logs
     networks:
       - cvat_network
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:8080/api/server/about || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
 
   # -----------------------------------------------------------
-  # CVAT worker — general purpose
+  # Open Policy Agent — CVAT IAM authorization engine
   # -----------------------------------------------------------
-  cvat_worker_general:
+  opa:
+    image: openpolicyagent/opa:latest
+    <<: [*restart_policy, *log_opts]
+    command:
+      - run
+      - --server
+      - --addr=:8181
+      # cvat-server alias (hyphen) is RFC 1034/1035-valid; Django accepts it
+      - --set=services.cvat.url=http://cvat-server:8080
+      - --set=bundles.cvat.service=cvat
+      - --set=bundles.cvat.resource=/api/auth/rules
+      - --set=bundles.cvat.polling.min_delay_seconds=10
+      - --set=bundles.cvat.polling.max_delay_seconds=60
+    networks:
+      - cvat_network
+
+  # -----------------------------------------------------------
+  # CVAT server (Django)
+  # -----------------------------------------------------------
+  cvat_server:
+    image: cvat/server:${CVAT_VERSION:-v2.20.0}
+    <<: [*restart_policy, *log_opts]
+    command: run server
+    depends_on:
+      cvat_server_init:
+        condition: service_completed_successfully
+      cvat_db:
+        condition: service_healthy
+      cvat_redis_inmem:
+        condition: service_healthy
+      cvat_redis_ondisk:
+        condition: service_healthy
+    environment:
+      <<: *cvat_env
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+    # Alias so OPA (and others) can reach this container via an RFC-valid hostname
+    networks:
+      cvat_network:
+        aliases:
+          - cvat-server
+    healthcheck:
+      # Use Python (always available) to check TCP port — avoids curl dependency
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/api/server/about')\" 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+
+  # -----------------------------------------------------------
+  # CVAT worker — background scheduler, notifications, cleaning
+  # -----------------------------------------------------------
+  cvat_worker_utils:
     image: cvat/server:${CVAT_VERSION:-v2.20.0}
     <<: [*restart_policy, *log_opts]
     depends_on:
       cvat_server:
         condition: service_healthy
-    command: run worker.general
+    command: run utils
     environment:
-      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
-      CVAT_REDIS_INMEM_PORT: "6379"
-      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
-      CVAT_REDIS_ONDISK_PORT: "6379"
-      CVAT_POSTGRES_HOST: cvat_db
-      CVAT_POSTGRES_DBNAME: ${POSTGRES_DB:-cvat}
-      CVAT_POSTGRES_USER: ${POSTGRES_USER:-root}
-      CVAT_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cvat_db_password_change_me}
+      <<: *cvat_env
     volumes:
       - cvat_data:/home/django/data
       - cvat_keys:/home/django/keys
@@ -148,14 +197,45 @@ services:
         condition: service_healthy
     command: run worker.annotation
     environment:
-      CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
-      CVAT_REDIS_INMEM_PORT: "6379"
-      CVAT_REDIS_ONDISK_HOST: cvat_redis_ondisk
-      CVAT_REDIS_ONDISK_PORT: "6379"
-      CVAT_POSTGRES_HOST: cvat_db
-      CVAT_POSTGRES_DBNAME: ${POSTGRES_DB:-cvat}
-      CVAT_POSTGRES_USER: ${POSTGRES_USER:-root}
-      CVAT_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cvat_db_password_change_me}
+      <<: *cvat_env
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+    networks:
+      - cvat_network
+
+  # -----------------------------------------------------------
+  # CVAT worker — export
+  # -----------------------------------------------------------
+  cvat_worker_export:
+    image: cvat/server:${CVAT_VERSION:-v2.20.0}
+    <<: [*restart_policy, *log_opts]
+    depends_on:
+      cvat_server:
+        condition: service_healthy
+    command: run worker.export
+    environment:
+      <<: *cvat_env
+    volumes:
+      - cvat_data:/home/django/data
+      - cvat_keys:/home/django/keys
+      - cvat_logs:/home/django/logs
+    networks:
+      - cvat_network
+
+  # -----------------------------------------------------------
+  # CVAT worker — import
+  # -----------------------------------------------------------
+  cvat_worker_import:
+    image: cvat/server:${CVAT_VERSION:-v2.20.0}
+    <<: [*restart_policy, *log_opts]
+    depends_on:
+      cvat_server:
+        condition: service_healthy
+    command: run worker.import
+    environment:
+      <<: *cvat_env
     volumes:
       - cvat_data:/home/django/data
       - cvat_keys:/home/django/keys
@@ -190,11 +270,11 @@ services:
     networks:
       - cvat_network
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost/api/server/about || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/api/server/about > /dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 60s
+      start_period: 150s
 
   # -----------------------------------------------------------
   # SAM2 assisted annotation service
