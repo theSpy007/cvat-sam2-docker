@@ -24,6 +24,10 @@ x-cvat-env: &cvat_env
   DJANGO_MODWSGI_EXTRA_ARGS: ""
   # Explicit list + wildcard — handles both internal Docker DNS and browser
   ALLOWED_HOSTS: "localhost,cvat-server,cvat_server,*"
+  # Public-facing URL — used by local settings to populate CSRF_TRUSTED_ORIGINS
+  CVAT_BASE_URL: "http://localhost:${CVAT_PORT:-8080}"
+  # Load local settings override that sets CSRF_TRUSTED_ORIGINS from CVAT_BASE_URL
+  DJANGO_SETTINGS_MODULE: "cvat.settings.local"
   CVAT_REDIS_INMEM_HOST: cvat_redis_inmem
   CVAT_REDIS_INMEM_PORT: "6379"
   CVAT_REDIS_INMEM_PASSWORD: ""
@@ -110,6 +114,7 @@ services:
       - cvat_data:/home/django/data
       - cvat_keys:/home/django/keys
       - cvat_logs:/home/django/logs
+      - ./compose/cvat_local_settings.py:/home/django/cvat/settings/local.py:ro
     networks:
       - cvat_network
 
@@ -154,6 +159,7 @@ services:
       - cvat_data:/home/django/data
       - cvat_keys:/home/django/keys
       - cvat_logs:/home/django/logs
+      - ./compose/cvat_local_settings.py:/home/django/cvat/settings/local.py:ro
     # Alias so OPA (and others) can reach this container via an RFC-valid hostname
     networks:
       cvat_network:
@@ -183,6 +189,7 @@ services:
       - cvat_data:/home/django/data
       - cvat_keys:/home/django/keys
       - cvat_logs:/home/django/logs
+      - ./compose/cvat_local_settings.py:/home/django/cvat/settings/local.py:ro
     networks:
       - cvat_network
 
@@ -202,6 +209,7 @@ services:
       - cvat_data:/home/django/data
       - cvat_keys:/home/django/keys
       - cvat_logs:/home/django/logs
+      - ./compose/cvat_local_settings.py:/home/django/cvat/settings/local.py:ro
     networks:
       - cvat_network
 
@@ -221,6 +229,7 @@ services:
       - cvat_data:/home/django/data
       - cvat_keys:/home/django/keys
       - cvat_logs:/home/django/logs
+      - ./compose/cvat_local_settings.py:/home/django/cvat/settings/local.py:ro
     networks:
       - cvat_network
 
@@ -240,6 +249,7 @@ services:
       - cvat_data:/home/django/data
       - cvat_keys:/home/django/keys
       - cvat_logs:/home/django/logs
+      - ./compose/cvat_local_settings.py:/home/django/cvat/settings/local.py:ro
     networks:
       - cvat_network
 
