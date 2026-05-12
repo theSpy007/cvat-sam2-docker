@@ -98,10 +98,12 @@ def load_model():
     start = time.time()
 
     try:
-        # Use Sam2ImageProcessorFast directly — the "Fast" variant is what
-        # transformers >=4.47 exports (Sam2ImageProcessor was renamed).
-        # AutoProcessor may resolve to Sam2VideoProcessor which is undesired.
-        from transformers import Sam2ImageProcessorFast, Sam2Model
+        # AutoProcessor resolves to Sam2VideoProcessor for SAM2 models.
+        # Sam2VideoProcessor correctly handles input_points/labels/boxes;
+        # Sam2ImageProcessorFast does NOT (it silently drops them with an
+        # "Unused or unrecognized kwargs" warning, causing every click to
+        # produce a default center mask).
+        from transformers import AutoProcessor, Sam2Model
         import torch
 
         _device = resolve_device()
@@ -109,7 +111,7 @@ def load_model():
         cache_dir = Path(MODEL_CACHE)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        _processor = Sam2ImageProcessorFast.from_pretrained(
+        _processor = AutoProcessor.from_pretrained(
             HF_MODEL_ID,
             cache_dir=str(cache_dir),
         )
@@ -192,8 +194,10 @@ def mask_to_bbox(mask: np.ndarray) -> List[float]:
     cols = np.any(mask, axis=0)
     if not rows.any():
         return [0.0, 0.0, 0.0, 0.0]
-    rmin, rmax = int(np.where(rows)[0][[0, -1]])
-    cmin, cmax = int(np.where(cols)[0][[0, -1]])
+    row_idx = np.where(rows)[0]
+    col_idx = np.where(cols)[0]
+    rmin, rmax = int(row_idx[0]), int(row_idx[-1])
+    cmin, cmax = int(col_idx[0]), int(col_idx[-1])
     return [float(cmin), float(rmin), float(cmax), float(rmax)]
 
 # ──────────────────────────────────────────────────────────────────
@@ -253,57 +257,72 @@ async def predict(req: PredictRequest):
             input_points, input_labels, input_boxes = None, None, None
 
             if req.points:
-                input_points = [[p.x, p.y] for p in req.points]
-                input_labels = [p.label for p in req.points]
+                # Sam2VideoProcessor expects:
+                #   input_points: depth-4 [image][object][point][x,y]
+                #   input_labels: depth-3 [image][object][point_label]
+                input_points = [[[[p.x, p.y] for p in req.points]]]
+                input_labels = [[[p.label for p in req.points]]]
 
             if req.boxes:
-                input_boxes = [[b.x1, b.y1, b.x2, b.y2] for b in req.boxes]
+                # input_boxes: depth-3 [image][box][x1,y1,x2,y2]
+                input_boxes = [[[b.x1, b.y1, b.x2, b.y2] for b in req.boxes]]
 
             inputs = _processor(
-                images=[image],
-                input_points=[input_points] if input_points else None,
-                input_labels=[input_labels] if input_labels else None,
-                input_boxes=[[input_boxes]] if input_boxes else None,
+                images=image,
+                input_points=input_points,
+                input_labels=input_labels,
+                input_boxes=input_boxes,
                 return_tensors="pt",
             ).to(_device)
 
             outputs = _model(**inputs)
 
-            masks, scores, _ = _processor.post_process_masks(
+            # transformers ≥4.47: post_process_masks(masks, original_sizes)
+            # returns a list of tensors (one per batch item), binarized to bool.
+            # Scores come from outputs.iou_scores, not post_process_masks.
+            processed_masks = _processor.post_process_masks(
                 outputs.pred_masks,
                 inputs["original_sizes"],
-                inputs["reshaped_input_sizes"],
             )
 
-            # masks shape: [1, N, H, W]
-            for i in range(masks.shape[1]):
-                m = masks[0, i].cpu().numpy().astype(bool)
-                s = float(scores[0, i].cpu().item())
-                results.append(MaskResult(
-                    mask=encode_mask(m),
-                    score=s,
-                    bbox=mask_to_bbox(m),
-                ))
+            # processed_masks[0]: (point_batch_size, num_masks, H, W) bool
+            # iou_scores[0]:      (point_batch_size, num_masks)
+            batch_masks = processed_masks[0]   # (pb, N, H, W)
+            batch_scores = outputs.iou_scores[0]  # (pb, N)
+
+            for pb in range(batch_masks.shape[0]):
+                for mi in range(batch_masks.shape[1]):
+                    m = batch_masks[pb, mi].cpu().numpy()
+                    s = float(batch_scores[pb, mi].cpu().item())
+                    results.append(MaskResult(
+                        mask=encode_mask(m),
+                        score=s,
+                        bbox=mask_to_bbox(m),
+                    ))
 
         else:
             # ── Automatic mask generation ────────────────────────────
             # Use the model's grid-based automatic mode
-            inputs = _processor(images=[image], return_tensors="pt").to(_device)
+            inputs = _processor(images=image, return_tensors="pt").to(_device)
             outputs = _model(**inputs)
 
-            masks, scores, _ = _processor.post_process_masks(
+            processed_masks = _processor.post_process_masks(
                 outputs.pred_masks,
                 inputs["original_sizes"],
-                inputs["reshaped_input_sizes"],
             )
 
-            # Return top-5 masks by score
-            top_n = min(5, masks.shape[1])
-            score_vals = scores[0].cpu().numpy()
-            top_idx = np.argsort(score_vals)[::-1][:top_n]
+            # processed_masks[0]: (point_batch_size, num_masks, H, W) bool
+            batch_masks = processed_masks[0]
+            batch_scores = outputs.iou_scores[0]  # (pb, N)
+
+            # Flatten across point_batch_size, return top-5 by score
+            flat_masks = batch_masks.reshape(-1, *batch_masks.shape[-2:])
+            flat_scores = batch_scores.reshape(-1).cpu().numpy()
+            top_n = min(5, flat_masks.shape[0])
+            top_idx = np.argsort(flat_scores)[::-1][:top_n]
             for i in top_idx:
-                m = masks[0, i].cpu().numpy().astype(bool)
-                s = float(score_vals[i])
+                m = flat_masks[i].cpu().numpy()
+                s = float(flat_scores[i])
                 results.append(MaskResult(
                     mask=encode_mask(m),
                     score=s,

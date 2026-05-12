@@ -41,6 +41,12 @@ x-cvat-env: &cvat_env
   SMOKESCREEN_OPTS: ""
   IAM_OPA_HOST: "http://opa:8181"
   IAM_OPA_BUNDLE: "1"
+  # Enable the MODELS plugin so CVAT's frontend shows the AI tools / magic wand.
+  # Without this, GET /api/server/plugins returns MODELS:false and the wand is hidden.
+  CVAT_SERVERLESS: "1"
+  # Nuclio proxy — tells the django lambda gateway where to reach nuclio-proxy
+  CVAT_NUCLIO_HOST: "nuclio"
+  CVAT_NUCLIO_PORT: "8070"
 
 services:
   # -----------------------------------------------------------
@@ -160,6 +166,10 @@ services:
       - cvat_keys:/home/django/keys
       - cvat_logs:/home/django/logs
       - ./compose/cvat_local_settings.py:/home/django/cvat/settings/local.py:ro
+    # host.docker.internal → host gateway so that INVOKE_METHOD=direct can reach
+    # the nuclio-proxy port that is exposed on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Alias so OPA (and others) can reach this container via an RFC-valid hostname
     networks:
       cvat_network:
@@ -285,6 +295,41 @@ services:
       timeout: 10s
       retries: 10
       start_period: 150s
+
+  # -----------------------------------------------------------
+  # Nuclio proxy — exposes a minimal Nuclio API so CVAT can
+  # discover the SAM2 interactor function.  Translates CVAT's
+  # interactor request format to our SAM2 service and returns
+  # polygon points.  Replaces a real Nuclio installation.
+  # -----------------------------------------------------------
+  nuclio:
+    build:
+      context: ./services/nuclio-proxy
+      dockerfile: Dockerfile
+    image: cvat-sam2/nuclio-proxy:latest
+    <<: [*restart_policy, *log_opts]
+    depends_on:
+      sam2:
+        condition: service_healthy
+    environment:
+      SAM2_HOST: sam2
+      SAM2_PORT: "8000"
+      PROXY_PORT: "8070"
+      # CVAT calls host.docker.internal:<FUNCTION_HOST_PORT> for direct invoke.
+      # This must match the host-side port mapping below.
+      FUNCTION_HOST_PORT: "${NUCLIO_PORT:-8070}"
+    ports:
+      # Bind to 0.0.0.0 so CVAT can reach this via host.docker.internal on Linux.
+      # The host-gateway IP is the Docker bridge address, not 127.0.0.1.
+      - "${NUCLIO_PORT:-8070}:8070"
+    networks:
+      - cvat_network
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8070/health')\" 2>/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   # -----------------------------------------------------------
   # SAM2 assisted annotation service
