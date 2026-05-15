@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 Yannick Otten
 """
 nuclio-proxy — Lightweight Nuclio API emulator for CVAT + SAM2
 ===============================================================

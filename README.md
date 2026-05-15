@@ -260,3 +260,28 @@ Quick checks:
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for a full system diagram.
+
+---
+
+## License
+
+Copyright 2025 Yannick Otten
+
+Licensed under the **Apache License, Version 2.0**. See [LICENSE](LICENSE) for the full text.
+
+### Third-party licenses
+
+| Component | License |
+|-----------|---------|
+| [CVAT](https://github.com/cvat-ai/cvat) | MIT |
+| [SAM2 model weights](https://huggingface.co/facebook/sam2-hiera-large) | Apache 2.0 |
+| [HuggingFace Transformers](https://github.com/huggingface/transformers) | Apache 2.0 |
+| [PyTorch](https://pytorch.org) | BSD-style |
+| [FastAPI](https://fastapi.tiangolo.com) | MIT |
+| [OpenCV](https://opencv.org) | Apache 2.0 |
+| [NumPy](https://numpy.org) | BSD 3-Clause |
+| [Pillow](https://python-pillow.org) | HPND (permissive) |
+| [Open Policy Agent](https://www.openpolicyagent.org) | Apache 2.0 |
+| [PostgreSQL](https://www.postgresql.org) | PostgreSQL License (permissive) |
+| [Redis](https://redis.io) | BSD 3-Clause |
+| [nginx](https://nginx.org) | BSD 2-Clause |

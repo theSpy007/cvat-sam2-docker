@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 Yannick Otten
 """
 registry.py — Model registry for the ONNX runner.
 Discovers and loads all models from the ONNX_MODELS_DIR directory.

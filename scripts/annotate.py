@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 Yannick Otten
 """
 annotate.py — Trigger CVAT task auto-annotation using an ONNX model.
 

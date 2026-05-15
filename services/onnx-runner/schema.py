@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 Yannick Otten
 """
 schema.py — Model configuration schema for ONNX runner.
 Validates model.yaml files placed in models/<name>/model.yaml.
