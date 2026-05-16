@@ -362,12 +362,14 @@ cmd_models_validate() {
 cmd_annotate() {
     local task_id=""
     local model_name=""
+    local overwrite_flag=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --task) task_id="$2"; shift 2 ;;
             --model) model_name="$2"; shift 2 ;;
-            *) die "Unknown option: $1. Usage: ./cvat-sam2 annotate --task <id> --model <name>" ;;
+            --overwrite) overwrite_flag="--overwrite"; shift ;;
+            *) die "Unknown option: $1. Usage: ./cvat-sam2 annotate --task <id> --model <name> [--overwrite]" ;;
         esac
     done
 
@@ -386,7 +388,8 @@ cmd_annotate() {
         --cvat-url "http://localhost:${CVAT_PORT:-8080}" \
         --cvat-user "${email}" \
         --cvat-pass "${pass}" \
-        --onnx-url  "http://localhost:${ONNX_PORT:-8001}"
+        --onnx-url  "http://localhost:${ONNX_PORT:-8001}" \
+        ${overwrite_flag}
 }
 
 # ------------------------------------------------------------------

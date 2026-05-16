@@ -1,97 +1,157 @@
 # =============================================================
-# model.yaml — Example ONNX segmentation model configuration
+# model.yaml — YOLO26x-seg ONNX instance segmentation model
 # =============================================================
-# Copy this directory to models/<your-model-name>/ and:
-#   1. Replace the values below with your model's specifics.
-#   2. Add your model.onnx weight file to the directory.
-#   3. Run: ./cvat-sam2 models validate
-#   4. Run: ./cvat-sam2 restart
+# Ultralytics YOLO26x-seg exported to ONNX with end-to-end NMS.
+# Trained on COCO (80 classes), outputs instance segmentation masks.
+#
+# Model metadata (from ONNX graph):
+#   Input:   'images'  [1, 3, 640, 640]  float32
+#   Output0: 'output0' [1, 300, 38]
+#            38 = x1, y1, x2, y2, conf, class_id, 32×mask_coefficients
+#   Output1: 'output1' [1, 32, 160, 160]  — prototype masks
 # =============================================================
 
 # Human-readable model name (used in CVAT auto-annotation UI)
-name: example-segmentation
+name: yolo26x-seg
 
 # Version string (free-form)
-version: "1.0"
+version: "8.4.51"
 
 # Optional description shown in model listing
 description: >
-  Example placeholder segmentation model.
-  Replace model.onnx with your trained weights.
+  Ultralytics YOLO26x-seg instance segmentation model trained on COCO (80 classes).
+  Exported to ONNX with end-to-end NMS; outputs bounding boxes + pixel masks.
 
 # Task type: segmentation | detection | classification
 task_type: segmentation
 
 # ── ONNX model I/O ───────────────────────────────────────────────
 
-# Name of the input tensor in the ONNX graph
-# Find with: python -c "import onnxruntime as ort; s=ort.InferenceSession('model.onnx'); print([i.name for i in s.get_inputs()])"
-input_name: input
+# Primary input tensor
+input_name: images
 
 # Input tensor shape [batch, channels, height, width] (NCHW)
-# or [batch, height, width, channels] (NHWC — set layout below)
 input_shape: [1, 3, 640, 640]
 
 # Input data type: float32 | float16 | uint8
 input_dtype: float32
 
-# Name of the output tensor in the ONNX graph
-output_name: output
+# Primary output tensor (bbox + mask coefficients).
+# The prototype mask tensor (output1) is fetched automatically for yolo_seg.
+output_name: output0
 
 # ── Preprocessing ─────────────────────────────────────────────────
 
 preprocessing:
-  # Resize input image to [height, width] before model input.
-  # If null, uses the spatial dims from input_shape.
   resize: [640, 640]
 
-  # Per-channel mean subtraction (after pixel_scale division)
-  # ImageNet defaults: [0.485, 0.456, 0.406]
-  normalize_mean: [0.485, 0.456, 0.406]
+  # YOLO models normalize only by pixel_scale — no mean/std subtraction.
+  normalize_mean: null
+  normalize_std: null
 
-  # Per-channel std division (after pixel_scale division)
-  normalize_std: [0.229, 0.224, 0.225]
-
-  # Divide raw pixel values [0-255] by this value before normalizing
   pixel_scale: 255.0
-
-  # Channel order expected by the model: RGB | BGR
   channel_order: RGB
-
-  # Memory layout: NCHW (standard PyTorch) | NHWC (TensorFlow)
   layout: NCHW
 
 # ── Postprocessing ────────────────────────────────────────────────
 
 postprocessing:
-  # Output type: mask | bbox | polygon
-  output_type: mask
+  # yolo_seg: reconstruct per-instance masks from mask coefficients × prototypes
+  output_type: yolo_seg
 
-  # Pixel value threshold for binary mask (0.0–1.0)
+  # Mask binarization threshold (applied after sigmoid on prototype product)
   mask_threshold: 0.5
 
-  # Apply sigmoid to output before thresholding (common for binary seg)
-  sigmoid: true
-
-  # Apply softmax to output (common for multi-class seg)
+  # sigmoid and softmax are applied internally by the yolo_seg postprocessor
+  sigmoid: false
   softmax: false
 
 # ── Thresholds ────────────────────────────────────────────────────
 
-# Minimum confidence score to keep a detection
 confidence_threshold: 0.5
-
-# NMS IoU threshold (used only for bbox output_type)
 nms_threshold: 0.4
 
 # ── Labels ───────────────────────────────────────────────────────
-# List the classes your model predicts.
-# The CVAT task must have matching label names for annotations to be created.
+# COCO 80 classes — must match label names in your CVAT task.
 
 labels:
-  - id: 0
-    name: background
-    color: "#000000"
-  - id: 1
-    name: object
-    color: "#FF0000"
+  - {id: 0,  name: person,          color: "#FF3838"}
+  - {id: 1,  name: bicycle,         color: "#FF9D97"}
+  - {id: 2,  name: car,             color: "#FF701F"}
+  - {id: 3,  name: motorcycle,      color: "#FFB21D"}
+  - {id: 4,  name: airplane,        color: "#CFD231"}
+  - {id: 5,  name: bus,             color: "#48F90A"}
+  - {id: 6,  name: train,           color: "#92CC17"}
+  - {id: 7,  name: truck,           color: "#3DDB86"}
+  - {id: 8,  name: boat,            color: "#1A9334"}
+  - {id: 9,  name: traffic light,   color: "#00D4BB"}
+  - {id: 10, name: fire hydrant,    color: "#2C99A8"}
+  - {id: 11, name: stop sign,       color: "#00C2FF"}
+  - {id: 12, name: parking meter,   color: "#344593"}
+  - {id: 13, name: bench,           color: "#6473FF"}
+  - {id: 14, name: bird,            color: "#0018EC"}
+  - {id: 15, name: cat,             color: "#8438FF"}
+  - {id: 16, name: dog,             color: "#520085"}
+  - {id: 17, name: horse,           color: "#CB38FF"}
+  - {id: 18, name: sheep,           color: "#FF95C8"}
+  - {id: 19, name: cow,             color: "#FF37C7"}
+  - {id: 20, name: elephant,        color: "#FF3838"}
+  - {id: 21, name: bear,            color: "#FF9D97"}
+  - {id: 22, name: zebra,           color: "#FF701F"}
+  - {id: 23, name: giraffe,         color: "#FFB21D"}
+  - {id: 24, name: backpack,        color: "#CFD231"}
+  - {id: 25, name: umbrella,        color: "#48F90A"}
+  - {id: 26, name: handbag,         color: "#92CC17"}
+  - {id: 27, name: tie,             color: "#3DDB86"}
+  - {id: 28, name: suitcase,        color: "#1A9334"}
+  - {id: 29, name: frisbee,         color: "#00D4BB"}
+  - {id: 30, name: skis,            color: "#2C99A8"}
+  - {id: 31, name: snowboard,       color: "#00C2FF"}
+  - {id: 32, name: sports ball,     color: "#344593"}
+  - {id: 33, name: kite,            color: "#6473FF"}
+  - {id: 34, name: baseball bat,    color: "#0018EC"}
+  - {id: 35, name: baseball glove,  color: "#8438FF"}
+  - {id: 36, name: skateboard,      color: "#520085"}
+  - {id: 37, name: surfboard,       color: "#CB38FF"}
+  - {id: 38, name: tennis racket,   color: "#FF95C8"}
+  - {id: 39, name: bottle,          color: "#FF37C7"}
+  - {id: 40, name: wine glass,      color: "#FF3838"}
+  - {id: 41, name: cup,             color: "#FF9D97"}
+  - {id: 42, name: fork,            color: "#FF701F"}
+  - {id: 43, name: knife,           color: "#FFB21D"}
+  - {id: 44, name: spoon,           color: "#CFD231"}
+  - {id: 45, name: bowl,            color: "#48F90A"}
+  - {id: 46, name: banana,          color: "#92CC17"}
+  - {id: 47, name: apple,           color: "#3DDB86"}
+  - {id: 48, name: sandwich,        color: "#1A9334"}
+  - {id: 49, name: orange,          color: "#00D4BB"}
+  - {id: 50, name: broccoli,        color: "#2C99A8"}
+  - {id: 51, name: carrot,          color: "#00C2FF"}
+  - {id: 52, name: hot dog,         color: "#344593"}
+  - {id: 53, name: pizza,           color: "#6473FF"}
+  - {id: 54, name: donut,           color: "#0018EC"}
+  - {id: 55, name: cake,            color: "#8438FF"}
+  - {id: 56, name: chair,           color: "#520085"}
+  - {id: 57, name: couch,           color: "#CB38FF"}
+  - {id: 58, name: potted plant,    color: "#FF95C8"}
+  - {id: 59, name: bed,             color: "#FF37C7"}
+  - {id: 60, name: dining table,    color: "#FF3838"}
+  - {id: 61, name: toilet,          color: "#FF9D97"}
+  - {id: 62, name: tv,              color: "#FF701F"}
+  - {id: 63, name: laptop,          color: "#FFB21D"}
+  - {id: 64, name: mouse,           color: "#CFD231"}
+  - {id: 65, name: remote,          color: "#48F90A"}
+  - {id: 66, name: keyboard,        color: "#92CC17"}
+  - {id: 67, name: cell phone,      color: "#3DDB86"}
+  - {id: 68, name: microwave,       color: "#1A9334"}
+  - {id: 69, name: oven,            color: "#00D4BB"}
+  - {id: 70, name: toaster,         color: "#2C99A8"}
+  - {id: 71, name: sink,            color: "#00C2FF"}
+  - {id: 72, name: refrigerator,    color: "#344593"}
+  - {id: 73, name: book,            color: "#6473FF"}
+  - {id: 74, name: clock,           color: "#0018EC"}
+  - {id: 75, name: vase,            color: "#8438FF"}
+  - {id: 76, name: scissors,        color: "#520085"}
+  - {id: 77, name: teddy bear,      color: "#CB38FF"}
+  - {id: 78, name: hair drier,      color: "#FF95C8"}
+  - {id: 79, name: toothbrush,      color: "#FF37C7"}

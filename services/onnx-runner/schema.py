@@ -22,7 +22,7 @@ class PreprocessingConfig(BaseModel):
 
 class PostprocessingConfig(BaseModel):
     """Model output postprocessing parameters."""
-    output_type: Literal["mask", "bbox", "polygon"] = "mask"
+    output_type: Literal["mask", "bbox", "polygon", "yolo_seg"] = "mask"
     mask_threshold: float = Field(0.5, ge=0.0, le=1.0)
     sigmoid: bool = False    # apply sigmoid before threshold
     softmax: bool = False    # apply softmax before threshold

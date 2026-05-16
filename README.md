@@ -63,7 +63,9 @@ CVAT will be available at **http://localhost:8080** (or whichever port you set i
 ./cvat-sam2 clean                       # Remove containers + ALL data (destructive)
 ./cvat-sam2 models list                 # List registered ONNX models
 ./cvat-sam2 models validate             # Validate model.yaml configs
-./cvat-sam2 annotate --task 42 --model example-segmentation  # Auto-annotate a task
+./cvat-sam2 annotate --task 42 --model yolo26m             # Auto-annotate (bboxes)
+./cvat-sam2 annotate --task 42 --model yolo26x-seg         # Auto-annotate (polygons)
+./cvat-sam2 annotate --task 42 --model yolo26m --overwrite # Replace existing annotations
 ./cvat-sam2 help                        # Full help
 ```
 
@@ -141,39 +143,47 @@ models/
 
 ### Step 2 — Write model.yaml
 
-Copy `models/example-segmentation/model.yaml` and edit:
+Copy `models/example-segmentation/model.yaml` and edit. Key fields depend on model type:
 
+**Detection model (e.g. YOLO with bbox output):**
 ```yaml
-name: my-model
+name: my-detector
 version: "1.0"
-task_type: segmentation   # or: detection
-input_name: input          # your ONNX input tensor name
+task_type: detection
+input_name: images
 input_shape: [1, 3, 640, 640]
-output_name: output
+output_name: output0
 preprocessing:
   resize: [640, 640]
-  normalize_mean: [0.485, 0.456, 0.406]
-  normalize_std: [0.229, 0.224, 0.225]
+  normalize_mean: null   # YOLO: no mean/std, only pixel_scale
+  normalize_std: null
   pixel_scale: 255.0
 postprocessing:
-  output_type: mask
-  mask_threshold: 0.5
-  sigmoid: true
+  output_type: bbox
 labels:
-  - id: 1
-    name: my-object
+  - {id: 0, name: person}
+  - {id: 1, name: bicycle}
 ```
 
-### Step 3 — Validate and restart
-
-```bash
-./cvat-sam2 models validate
-./cvat-sam2 restart
-```
-
-Your model is now available via the ONNX runner API at:
-```
-http://localhost:8001/models/my-model/predict
+**Instance segmentation model (e.g. YOLO-seg):**
+```yaml
+name: my-seg-model
+version: "1.0"
+task_type: segmentation
+input_name: images
+input_shape: [1, 3, 640, 640]
+output_name: output0          # bbox+coeffs tensor; prototype tensor fetched automatically
+preprocessing:
+  resize: [640, 640]
+  normalize_mean: null
+  normalize_std: null
+  pixel_scale: 255.0
+postprocessing:
+  output_type: yolo_seg       # reconstructs masks from coefficients × prototypes
+  mask_threshold: 0.5
+labels:
+  - {id: 0, name: person}
+  - {id: 1, name: bicycle}
 ```
 
 See [docs/models.md](docs/models.md) for the full schema reference.
@@ -183,19 +193,28 @@ See [docs/models.md](docs/models.md) for the full schema reference.
 ## Auto-annotate a dataset/task
 
 ```bash
-./cvat-sam2 annotate --task <CVAT-task-id> --model <model-name>
+./cvat-sam2 annotate --task <CVAT-task-id> --model <model-name> [--overwrite]
 ```
 
-Example:
+Examples:
 ```bash
-./cvat-sam2 annotate --task 42 --model example-segmentation
+# Detection model → uploads bounding box annotations
+./cvat-sam2 annotate --task 42 --model yolo26m
+
+# Instance segmentation model → uploads polygon annotations
+./cvat-sam2 annotate --task 42 --model yolo26x-seg
+
+# Replace all existing annotations before uploading
+./cvat-sam2 annotate --task 42 --model yolo26x-seg --overwrite
 ```
 
 This will:
 1. Authenticate with CVAT.
 2. Download each frame.
 3. Send it to the ONNX runner for inference.
-4. Upload bounding boxes / masks back to CVAT as annotations.
+4. Upload **polygon** annotations (segmentation models) or **bounding box** annotations (detection models) back to CVAT.
+
+> Only labels that exist in the CVAT task are uploaded — detections for unknown classes are skipped.
 
 After running, open the task in CVAT to review and edit the auto-generated annotations.
 

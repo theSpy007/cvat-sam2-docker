@@ -103,6 +103,15 @@ class CVATClient:
         resp.raise_for_status()
         log.info("Uploaded annotations to task %d", task_id)
 
+    def delete_annotations(self, task_id: int) -> None:
+        """Delete all existing annotations on a task."""
+        resp = self.session.delete(
+            f"{self.base_url}/api/tasks/{task_id}/annotations",
+            timeout=60,
+        )
+        resp.raise_for_status()
+        log.info("Deleted existing annotations from task %d", task_id)
+
     def get_labels(self, task_id: int) -> List[dict]:
         """Fetch full label objects via /api/labels?task_id= (paginated)."""
         labels: List[dict] = []
@@ -156,21 +165,37 @@ def build_cvat_annotations(
                 log.info("Skipping detection with label %r — not in task", label_name)
                 continue
 
-            bbox = det.get("bbox", [0, 0, 0, 0])
-            x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
-
-            shapes.append({
-                "type": "rectangle",
-                "occluded": False,
-                "z_order": 0,
-                "rotation": 0.0,
-                "points": [x1, y1, x2, y2],
-                "frame": frame_id,
-                "label_id": label_id,
-                "group": 0,
-                "source": "auto",
-                "attributes": [],
-            })
+            polygon = det.get("polygon")
+            if polygon and len(polygon) >= 6:
+                # Segmentation model — runner already extracted the contour
+                shapes.append({
+                    "type": "polygon",
+                    "occluded": False,
+                    "z_order": 0,
+                    "rotation": 0.0,
+                    "points": polygon,
+                    "frame": frame_id,
+                    "label_id": label_id,
+                    "group": 0,
+                    "source": "auto",
+                    "attributes": [],
+                })
+            else:
+                # Detection-only model — use bbox rectangle
+                bbox = det.get("bbox", [0, 0, 0, 0])
+                x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+                shapes.append({
+                    "type": "rectangle",
+                    "occluded": False,
+                    "z_order": 0,
+                    "rotation": 0.0,
+                    "points": [x1, y1, x2, y2],
+                    "frame": frame_id,
+                    "label_id": label_id,
+                    "group": 0,
+                    "source": "auto",
+                    "attributes": [],
+                })
 
     return {
         "version": 0,
@@ -194,6 +219,8 @@ def main() -> int:
     parser.add_argument("--onnx-url",   required=True,            help="ONNX runner base URL")
     parser.add_argument("--frames",     type=int, default=0,
                         help="Max frames to annotate (0 = all)")
+    parser.add_argument("--overwrite",  action="store_true",
+                        help="Delete existing annotations before uploading")
     args = parser.parse_args()
 
     cvat    = CVATClient(args.cvat_url, args.cvat_user, args.cvat_pass)
@@ -231,6 +258,9 @@ def main() -> int:
     log.info("Total shapes to upload: %d", total_shapes)
 
     if total_shapes > 0:
+        if args.overwrite:
+            log.info("Deleting existing annotations (--overwrite) ...")
+            cvat.delete_annotations(args.task)
         cvat.upload_annotations(args.task, annotations)
         log.info("Done. Open CVAT task %d to review annotations.", args.task)
     else:

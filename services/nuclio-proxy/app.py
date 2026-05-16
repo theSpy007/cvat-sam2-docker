@@ -355,6 +355,25 @@ async def _handle_onnx_invoke(request: Request, model_name: str) -> Any:
         model_label = det.get("label", "")
         mapped = mapping.get(model_label, {})
         cvat_label = mapped.get("name", model_label) if mapped else model_label
+
+        mask_b64_det = det.get("mask")
+        if mask_b64_det:
+            # Segmentation model — convert mask to polygon
+            try:
+                poly_points = _mask_to_polygon_points(mask_b64_det)
+            except Exception as exc:
+                log.warning("mask→polygon failed for %s: %s", model_label, exc)
+                poly_points = None
+            if poly_points:
+                cvat_results.append({
+                    "confidence": str(round(det.get("confidence", 0.0), 4)),
+                    "label": cvat_label,
+                    "points": poly_points,
+                    "type": "polygon",
+                    "attributes": [],
+                })
+                continue
+        # Detection-only model (or mask conversion failed) — use bbox rectangle
         cvat_results.append({
             "confidence": str(round(det.get("confidence", 0.0), 4)),
             "label": cvat_label,
@@ -368,6 +387,27 @@ async def _handle_onnx_invoke(request: Request, model_name: str) -> Any:
 
 
 # ── Helpers ───────────────────────────────────────────────────────
+
+def _mask_to_polygon_points(mask_b64: str) -> Optional[List[float]]:
+    """
+    Convert a base64 PNG mask to a flat CVAT polygon points list [x1,y1,x2,y2,...].
+    Returns None if no contour is found (empty/degenerate mask).
+    """
+    import cv2
+
+    data = base64.b64decode(mask_b64)
+    arr  = np.array(Image.open(io.BytesIO(data)).convert("L"), dtype=np.uint8)
+    _, binary = cv2.threshold(arr, 127, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_TC89_KCOS)
+    if not contours:
+        return None
+    largest = max(contours, key=cv2.contourArea)
+    epsilon = 0.005 * cv2.arcLength(largest, True)
+    approx  = cv2.approxPolyDP(largest, epsilon, True)
+    if len(approx) < 3:
+        return None
+    return [coord for pt in approx for coord in (float(pt[0][0]), float(pt[0][1]))]
+
 
 def _mask_to_cvat_response(mask_b64: str) -> Dict[str, Any]:
     """
