@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import os
 import sys
@@ -56,6 +57,8 @@ SAM2_BASE = f"http://{SAM2_HOST}:{SAM2_PORT}"
 PROXY_PORT = int(os.environ.get("PROXY_PORT", 8070))
 # Host port that CVAT will use when calling via host.docker.internal
 FUNCTION_HOST_PORT = int(os.environ.get("FUNCTION_HOST_PORT", PROXY_PORT))
+# ONNX runner — used to discover and invoke ONNX detector models
+ONNX_RUNNER_URL = os.environ.get("ONNX_RUNNER_URL", "http://onnx_runner:8001")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -100,6 +103,62 @@ FUNCTION_DESCRIPTOR: Dict[str, Any] = {
     },
 }
 
+
+async def _fetch_onnx_descriptors() -> Dict[str, Dict[str, Any]]:
+    """
+    Query the ONNX runner's /models endpoint and build a Nuclio-style
+    descriptor dict for every detection model that has ONNX weights.
+    CVAT reads these descriptors to populate its Detectors tool panel.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{ONNX_RUNNER_URL}/models")
+            resp.raise_for_status()
+            model_list: Dict[str, dict] = resp.json()
+    except Exception as exc:
+        log.warning("Could not reach ONNX runner to list models: %s", exc)
+        return {}
+
+    descriptors: Dict[str, Dict[str, Any]] = {}
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for model_key, info in model_list.items():
+            if not info.get("has_weights", False):
+                continue  # skip placeholders without ONNX weights
+            # Fetch full config to obtain the labels list for CVAT's spec field
+            try:
+                cfg_resp = await client.get(f"{ONNX_RUNNER_URL}/models/{model_key}")
+                cfg_resp.raise_for_status()
+                cfg = cfg_resp.json()
+            except Exception as exc:
+                log.warning("Could not fetch config for ONNX model %r: %s", model_key, exc)
+                cfg = info
+
+            labels = cfg.get("labels") or []
+            spec = json.dumps([{"id": lbl["id"], "name": lbl["name"]} for lbl in labels])
+            fn_name = f"onnx-{model_key}"
+            descriptors[fn_name] = {
+                "metadata": {
+                    "name": fn_name,
+                    "namespace": "nuclio",
+                    "annotations": {
+                        "name": f"{cfg.get('name', model_key)} (ONNX)",
+                        "type": "detector",
+                        "framework": "onnx",
+                        "spec": spec,
+                        "version": "2",
+                    },
+                },
+                "spec": {
+                    "description": cfg.get("description") or "",
+                },
+                "status": {
+                    "httpPort": FUNCTION_HOST_PORT,
+                    "state": "ready",
+                },
+            }
+    return descriptors
+
+
 # ──────────────────────────────────────────────────────────────────
 # FastAPI app
 # ──────────────────────────────────────────────────────────────────
@@ -109,15 +168,20 @@ app = FastAPI(title="Nuclio Proxy for CVAT + SAM2")
 
 @app.get("/api/functions")
 async def list_functions():
-    """Return a dict of functions (Nuclio format)."""
-    return {"sam2": FUNCTION_DESCRIPTOR}
+    """Return a dict of all functions: SAM2 interactor + ONNX detectors."""
+    fns: Dict[str, Any] = {"sam2": FUNCTION_DESCRIPTOR}
+    fns.update(await _fetch_onnx_descriptors())
+    return fns
 
 
 @app.get("/api/functions/{name}")
 async def get_function(name: str):
-    if name != "sam2":
-        raise HTTPException(status_code=404, detail=f"function {name!r} not found")
-    return FUNCTION_DESCRIPTOR
+    if name == "sam2":
+        return FUNCTION_DESCRIPTOR
+    onnx = await _fetch_onnx_descriptors()
+    if name in onnx:
+        return onnx[name]
+    raise HTTPException(status_code=404, detail=f"function {name!r} not found")
 
 
 # ── CVAT dashboard invocation endpoint ────────────────────────────
@@ -130,9 +194,12 @@ async def invoke_via_dashboard(request: Request):
     This endpoint handles all function invocations.
     """
     function_name = request.headers.get("x-nuclio-function-name", "")
-    if function_name != "sam2":
-        raise HTTPException(status_code=404, detail=f"function {function_name!r} not found")
-    return await _handle_invoke(request)
+    if function_name == "sam2":
+        return await _handle_invoke(request)
+    if function_name.startswith("onnx-"):
+        model_name = function_name[len("onnx-"):]
+        return await _handle_onnx_invoke(request, model_name)
+    raise HTTPException(status_code=404, detail=f"function {function_name!r} not found")
 
 
 # ── CVAT direct invocation endpoint ───────────────────────────────
@@ -237,6 +304,67 @@ async def _handle_invoke(request: Request):
         len(result["points"]),
     )
     return result
+
+
+async def _handle_onnx_invoke(request: Request, model_name: str) -> Any:
+    """
+    Handle a CVAT Nuclio detector invocation for an ONNX model.
+
+    CVAT sends:
+        {"image": "<base64>", "threshold": 0.5,
+         "mapping": {"model_label": {"name": "cvat_label", "attributes": []}}}
+
+    CVAT expects back a list of shape dicts:
+        [{"confidence": "0.85", "label": "cvat_label",
+          "points": [x1, y1, x2, y2], "type": "rectangle", "attributes": []}]
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    image_b64: str = body.get("image", "")
+    threshold: float = float(body.get("threshold", 0.5))
+    mapping: Dict[str, Any] = body.get("mapping") or {}
+
+    if not image_b64:
+        raise HTTPException(status_code=400, detail="Missing 'image' field")
+
+    log.info("ONNX detect: model=%s threshold=%.2f", model_name, threshold)
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{ONNX_RUNNER_URL}/models/{model_name}/predict",
+                json={"image": image_b64, "confidence_threshold": threshold},
+            )
+            resp.raise_for_status()
+            result = resp.json()
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code == 404:
+            raise HTTPException(status_code=404, detail=f"ONNX model {model_name!r} not found")
+        log.error("ONNX runner error %s: %s", code, exc.response.text[:500])
+        raise HTTPException(status_code=502, detail=f"ONNX runner error: {code}")
+    except Exception as exc:
+        log.error("ONNX runner unreachable: %s", exc)
+        raise HTTPException(status_code=502, detail=f"ONNX runner unreachable: {exc}")
+
+    cvat_results = []
+    for det in result.get("detections", []):
+        model_label = det.get("label", "")
+        mapped = mapping.get(model_label, {})
+        cvat_label = mapped.get("name", model_label) if mapped else model_label
+        cvat_results.append({
+            "confidence": str(round(det.get("confidence", 0.0), 4)),
+            "label": cvat_label,
+            "points": det.get("bbox", []),
+            "type": "rectangle",
+            "attributes": [],
+        })
+
+    log.info("ONNX detect: model=%s → %d detections", model_name, len(cvat_results))
+    return cvat_results
 
 
 # ── Helpers ───────────────────────────────────────────────────────

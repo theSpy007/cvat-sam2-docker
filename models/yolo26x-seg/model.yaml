@@ -1,0 +1,97 @@
+# =============================================================
+# model.yaml — Example ONNX segmentation model configuration
+# =============================================================
+# Copy this directory to models/<your-model-name>/ and:
+#   1. Replace the values below with your model's specifics.
+#   2. Add your model.onnx weight file to the directory.
+#   3. Run: ./cvat-sam2 models validate
+#   4. Run: ./cvat-sam2 restart
+# =============================================================
+
+# Human-readable model name (used in CVAT auto-annotation UI)
+name: example-segmentation
+
+# Version string (free-form)
+version: "1.0"
+
+# Optional description shown in model listing
+description: >
+  Example placeholder segmentation model.
+  Replace model.onnx with your trained weights.
+
+# Task type: segmentation | detection | classification
+task_type: segmentation
+
+# ── ONNX model I/O ───────────────────────────────────────────────
+
+# Name of the input tensor in the ONNX graph
+# Find with: python -c "import onnxruntime as ort; s=ort.InferenceSession('model.onnx'); print([i.name for i in s.get_inputs()])"
+input_name: input
+
+# Input tensor shape [batch, channels, height, width] (NCHW)
+# or [batch, height, width, channels] (NHWC — set layout below)
+input_shape: [1, 3, 640, 640]
+
+# Input data type: float32 | float16 | uint8
+input_dtype: float32
+
+# Name of the output tensor in the ONNX graph
+output_name: output
+
+# ── Preprocessing ─────────────────────────────────────────────────
+
+preprocessing:
+  # Resize input image to [height, width] before model input.
+  # If null, uses the spatial dims from input_shape.
+  resize: [640, 640]
+
+  # Per-channel mean subtraction (after pixel_scale division)
+  # ImageNet defaults: [0.485, 0.456, 0.406]
+  normalize_mean: [0.485, 0.456, 0.406]
+
+  # Per-channel std division (after pixel_scale division)
+  normalize_std: [0.229, 0.224, 0.225]
+
+  # Divide raw pixel values [0-255] by this value before normalizing
+  pixel_scale: 255.0
+
+  # Channel order expected by the model: RGB | BGR
+  channel_order: RGB
+
+  # Memory layout: NCHW (standard PyTorch) | NHWC (TensorFlow)
+  layout: NCHW
+
+# ── Postprocessing ────────────────────────────────────────────────
+
+postprocessing:
+  # Output type: mask | bbox | polygon
+  output_type: mask
+
+  # Pixel value threshold for binary mask (0.0–1.0)
+  mask_threshold: 0.5
+
+  # Apply sigmoid to output before thresholding (common for binary seg)
+  sigmoid: true
+
+  # Apply softmax to output (common for multi-class seg)
+  softmax: false
+
+# ── Thresholds ────────────────────────────────────────────────────
+
+# Minimum confidence score to keep a detection
+confidence_threshold: 0.5
+
+# NMS IoU threshold (used only for bbox output_type)
+nms_threshold: 0.4
+
+# ── Labels ───────────────────────────────────────────────────────
+# List the classes your model predicts.
+# The CVAT task must have matching label names for annotations to be created.
+
+labels:
+  - id: 0
+    name: background
+    color: "#000000"
+  - id: 1
+    name: object
+    color: "#FF0000"

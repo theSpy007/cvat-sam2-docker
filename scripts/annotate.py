@@ -57,6 +57,11 @@ class CVATClient:
             raise RuntimeError(
                 f"CVAT login failed ({resp.status_code}): {resp.text[:500]}"
             )
+        # CVAT (Django) requires X-CSRFToken on all state-changing requests.
+        # The login response sets the csrftoken cookie; mirror it as a header.
+        csrf = self.session.cookies.get("csrftoken", "")
+        if csrf:
+            self.session.headers.update({"X-CSRFToken": csrf})
         log.info("Authenticated with CVAT as %s", username)
 
     def get_task(self, task_id: int) -> dict:
@@ -85,15 +90,30 @@ class CVATClient:
         """Upload annotations in CVAT JSON format to a task."""
         resp = self.session.patch(
             f"{self.base_url}/api/tasks/{task_id}/annotations",
+            params={"action": "create"},
             json=annotations,
             timeout=60,
         )
+        if not resp.ok:
+            log.error(
+                "CVAT rejected annotations (%s): %s",
+                resp.status_code,
+                resp.text[:2000],
+            )
         resp.raise_for_status()
         log.info("Uploaded annotations to task %d", task_id)
 
     def get_labels(self, task_id: int) -> List[dict]:
-        task = self.get_task(task_id)
-        return task.get("labels", [])
+        """Fetch full label objects via /api/labels?task_id= (paginated)."""
+        labels: List[dict] = []
+        url: Optional[str] = f"{self.base_url}/api/labels?task_id={task_id}"
+        while url:
+            resp = self.session.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            labels.extend(data.get("results", []))
+            url = data.get("next")
+        return labels
 
 # ──────────────────────────────────────────────────────────────────
 # ONNX runner helpers
@@ -133,8 +153,8 @@ def build_cvat_annotations(
             label_name = det.get("label", "object")
             label_id = label_map.get(label_name)
             if label_id is None:
-                # Use first available label as fallback
-                label_id = cvat_labels[0]["id"] if cvat_labels else 0
+                log.info("Skipping detection with label %r — not in task", label_name)
+                continue
 
             bbox = det.get("bbox", [0, 0, 0, 0])
             x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
@@ -142,7 +162,6 @@ def build_cvat_annotations(
             shapes.append({
                 "type": "rectangle",
                 "occluded": False,
-                "outside": False,
                 "z_order": 0,
                 "rotation": 0.0,
                 "points": [x1, y1, x2, y2],

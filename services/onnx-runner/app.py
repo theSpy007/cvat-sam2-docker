@@ -229,7 +229,12 @@ def postprocess_output(
                     continue
                 x1, y1, x2, y2, obj_conf = row[:5]
                 class_scores = row[5:]
-                if len(class_scores) > 0:
+                if len(class_scores) == 1:
+                    # End-to-end NMS export: last column is the class index, not a score vector.
+                    # e.g. Ultralytics ONNX with end2end=True → [x1,y1,x2,y2,conf,class_id]
+                    cls_id = int(round(float(class_scores[0])))
+                    score = float(obj_conf)
+                elif len(class_scores) > 1:
                     cls_id = int(class_scores.argmax())
                     score = float(obj_conf * class_scores[cls_id])
                 else:
@@ -238,11 +243,19 @@ def postprocess_output(
                 if score < conf_thresh:
                     continue
                 label_name = labels[cls_id].name if cls_id < len(labels) else str(cls_id)
+                # Scale from model input space (e.g. 640×640) to original image size
+                model_h = cfg.input_shape[-2]
+                model_w = cfg.input_shape[-1]
+                sx = orig_w / model_w
+                sy = orig_h / model_h
                 results.append(DetectionResult(
                     label=label_name,
                     label_id=cls_id,
                     confidence=score,
-                    bbox=[float(x1), float(y1), float(x2), float(y2)],
+                    bbox=[
+                        float(x1) * sx, float(y1) * sy,
+                        float(x2) * sx, float(y2) * sy,
+                    ],
                 ))
 
     return results

@@ -318,6 +318,8 @@ services:
       # CVAT calls host.docker.internal:<FUNCTION_HOST_PORT> for direct invoke.
       # This must match the host-side port mapping below.
       FUNCTION_HOST_PORT: "${NUCLIO_PORT:-8070}"
+      # ONNX runner — used to discover and invoke ONNX detector models
+      ONNX_RUNNER_URL: "http://onnx_runner:8001"
     ports:
       # Bind to 0.0.0.0 so CVAT can reach this via host.docker.internal on Linux.
       # The host-gateway IP is the Docker bridge address, not 127.0.0.1.
