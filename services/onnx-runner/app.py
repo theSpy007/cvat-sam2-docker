@@ -91,6 +91,35 @@ def decode_image(b64: str) -> Image.Image:
         raise HTTPException(status_code=400, detail=f"Invalid image: {exc}") from exc
 
 
+def letterbox_image(
+    image: Image.Image, target_h: int, target_w: int
+) -> tuple:
+    """
+    Resize image with uniform scale + gray padding to fill target_h×target_w
+    without distorting aspect ratio (letterboxing, identical to Ultralytics
+    training-time preprocessing).
+
+    Returns (padded_image, scale, pad_top, pad_left) where:
+      scale      — uniform scale factor applied to the original image
+      pad_top    — pixels of gray padding added above the content
+      pad_left   — pixels of gray padding added to the left of the content
+
+    To map model-space coordinates back to original image space:
+      x_orig = (x_model - pad_left) / scale
+      y_orig = (y_model - pad_top)  / scale
+    """
+    orig_w, orig_h = image.size
+    scale  = min(target_w / orig_w, target_h / orig_h)
+    new_w  = int(round(orig_w * scale))
+    new_h  = int(round(orig_h * scale))
+    resized = image.resize((new_w, new_h), Image.BILINEAR)
+    pad_top  = (target_h - new_h) // 2
+    pad_left = (target_w - new_w) // 2
+    padded = Image.new("RGB", (target_w, target_h), (114, 114, 114))
+    padded.paste(resized, (pad_left, pad_top))
+    return padded, scale, pad_top, pad_left
+
+
 def preprocess_image(image: Image.Image, cfg: ModelConfig) -> np.ndarray:
     """Resize, normalize, and format image per model config."""
     pre = cfg.preprocessing
@@ -214,6 +243,82 @@ def postprocess_yolo_seg(
             confidence=float(conf),
             bbox=[float(x1) * sx, float(y1) * sy, float(x2) * sx, float(y2) * sy],
             mask=mask_b64,
+            polygon=polygon,
+        ))
+
+    return results
+
+
+def postprocess_yolo_obb(
+    output0: np.ndarray,
+    cfg: ModelConfig,
+    orig_w: int,
+    orig_h: int,
+    lb_scale: float,
+    lb_pad_top: int,
+    lb_pad_left: int,
+    conf_thresh: float,
+) -> List[DetectionResult]:
+    """
+    YOLO OBB postprocessor (Ultralytics end2end export).
+
+    output0: [1, N, 7] — N detections: [cx, cy, w, h, conf, class_id, angle_rad]
+
+    Coordinates are in letterboxed model space. We:
+      1. Undo the letterbox offset and scale to original image space (uniform
+         scale means angles are preserved, corners remain at 90°).
+      2. Compute 4 rotated corners using the Ultralytics xywhr2xyxyxyxy convention.
+      3. Return corners as a flat polygon [x1,y1, x2,y2, x3,y3, x4,y4].
+    """
+    results: List[DetectionResult] = []
+    labels = cfg.labels or []
+    dets = output0[0]   # [N, 7]
+
+    for i in range(dets.shape[0]):
+        row = dets[i]
+        cx, cy, w, h = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+        conf   = float(row[4])
+        cls_id = int(round(float(row[5])))
+        angle  = float(row[6])   # radians
+
+        if conf < conf_thresh:
+            continue
+
+        label_name = labels[cls_id].name if cls_id < len(labels) else str(cls_id)
+
+        # Undo letterbox — map from model space to original image space.
+        # Uniform scale preserves angles exactly.
+        cx_img = (cx - lb_pad_left) / lb_scale
+        cy_img = (cy - lb_pad_top)  / lb_scale
+        w_img  = w / lb_scale
+        h_img  = h / lb_scale
+
+        # Build 4 corners using Ultralytics xywhr2xyxyxyxy convention:
+        #   vec1 = half-width vector  = [hw·cos, hw·sin]
+        #   vec2 = half-height vector = [−hh·sin, hh·cos]  (perpendicular)
+        #   corners = centre ± vec1 ± vec2
+        hw, hh = w_img / 2.0, h_img / 2.0
+        cos_a, sin_a = float(np.cos(angle)), float(np.sin(angle))
+        v1x, v1y =  hw * cos_a,  hw * sin_a
+        v2x, v2y = -hh * sin_a,  hh * cos_a
+
+        corners = [
+            (cx_img + v1x + v2x, cy_img + v1y + v2y),
+            (cx_img + v1x - v2x, cy_img + v1y - v2y),
+            (cx_img - v1x - v2x, cy_img - v1y - v2y),
+            (cx_img - v1x + v2x, cy_img - v1y + v2y),
+        ]
+
+        polygon = [coord for pt in corners for coord in pt]
+        xs = [pt[0] for pt in corners]
+        ys = [pt[1] for pt in corners]
+        bbox = [min(xs), min(ys), max(xs), max(ys)]
+
+        results.append(DetectionResult(
+            label=label_name,
+            label_id=cls_id,
+            confidence=conf,
+            bbox=bbox,
             polygon=polygon,
         ))
 
@@ -390,19 +495,32 @@ async def predict(model_name: str, req: InferenceRequest):
     conf_thresh = req.confidence_threshold or cfg.confidence_threshold
     mask_thresh = req.mask_threshold or cfg.postprocessing.mask_threshold
 
-    # Preprocess
-    inp = preprocess_image(image, cfg)
-
     # Run ONNX inference
     start = time.perf_counter()
     if cfg.postprocessing.output_type == "yolo_seg":
+        # Preprocess with simple resize (seg model is trained on square crops)
+        inp = preprocess_image(image, cfg)
         # Fetch all outputs (bbox+coeffs in [0], prototypes in [1])
         outputs = session.run(None, {cfg.input_name: inp})
         elapsed_ms = (time.perf_counter() - start) * 1000
         detections = postprocess_yolo_seg(
             outputs[0], outputs[1], cfg, orig_w, orig_h, conf_thresh, mask_thresh
         )
+    elif cfg.postprocessing.output_type == "yolo_obb":
+        # Letterbox to preserve aspect ratio — OBB angles are only correct when
+        # the image is not distorted (i.e. scale is uniform, sx == sy).
+        pre = cfg.preprocessing
+        target_h = pre.resize[0] if pre.resize else cfg.input_shape[-2]
+        target_w = pre.resize[1] if pre.resize else cfg.input_shape[-1]
+        img_lb, lb_scale, lb_pad_top, lb_pad_left = letterbox_image(image, target_h, target_w)
+        inp = preprocess_image(img_lb, cfg)  # resize is now a no-op (already target size)
+        outputs = session.run([cfg.output_name], {cfg.input_name: inp})
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        detections = postprocess_yolo_obb(
+            outputs[0], cfg, orig_w, orig_h, lb_scale, lb_pad_top, lb_pad_left, conf_thresh
+        )
     else:
+        inp = preprocess_image(image, cfg)
         outputs = session.run([cfg.output_name], {cfg.input_name: inp})
         elapsed_ms = (time.perf_counter() - start) * 1000
         detections = postprocess_output(outputs[0], cfg, orig_w, orig_h, conf_thresh, mask_thresh)

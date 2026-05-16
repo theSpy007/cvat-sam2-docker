@@ -356,9 +356,21 @@ async def _handle_onnx_invoke(request: Request, model_name: str) -> Any:
         mapped = mapping.get(model_label, {})
         cvat_label = mapped.get("name", model_label) if mapped else model_label
 
+        # 1. Pre-computed polygon (OBB 4-corner or seg contour from runner)
+        poly_field = det.get("polygon")
+        if poly_field and len(poly_field) >= 6:
+            cvat_results.append({
+                "confidence": str(round(det.get("confidence", 0.0), 4)),
+                "label": cvat_label,
+                "points": poly_field,
+                "type": "polygon",
+                "attributes": [],
+            })
+            continue
+
+        # 2. Raw mask — convert to polygon contour
         mask_b64_det = det.get("mask")
         if mask_b64_det:
-            # Segmentation model — convert mask to polygon
             try:
                 poly_points = _mask_to_polygon_points(mask_b64_det)
             except Exception as exc:
@@ -373,7 +385,8 @@ async def _handle_onnx_invoke(request: Request, model_name: str) -> Any:
                     "attributes": [],
                 })
                 continue
-        # Detection-only model (or mask conversion failed) — use bbox rectangle
+
+        # 3. Detection-only model — use axis-aligned bbox rectangle
         cvat_results.append({
             "confidence": str(round(det.get("confidence", 0.0), 4)),
             "label": cvat_label,

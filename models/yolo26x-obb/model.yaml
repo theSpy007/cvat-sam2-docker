@@ -1,0 +1,82 @@
+# =============================================================
+# model.yaml — YOLO26x-OBB ONNX oriented bounding box model
+# =============================================================
+# Ultralytics YOLO26x-OBB exported to ONNX with end-to-end NMS.
+# Trained on DOTAv1 (15 classes), outputs oriented bounding boxes.
+#
+# Model metadata (from ONNX graph):
+#   Input:   'images'  [1, 3, 1024, 1024]  float32
+#   Output0: 'output0' [1, 300, 7]
+#            7 = cx, cy, w, h, conf, cls_id, angle_rad
+#
+# OBBs are delivered to CVAT as 4-corner polygons.
+# =============================================================
+
+name: yolo26x-obb
+
+version: "8.4.51"
+
+description: >
+  Ultralytics YOLO26x-OBB oriented bounding box model trained on DOTAv1 (15 classes).
+  Exported to ONNX with end-to-end NMS; outputs rotated bounding boxes
+  represented as 4-corner polygons in CVAT.
+
+task_type: detection
+
+# ── ONNX model I/O ───────────────────────────────────────────────
+
+input_name: images
+input_shape: [1, 3, 1024, 1024]
+input_dtype: float32
+
+# OBB end2end export produces a single output tensor.
+output_name: output0
+
+# ── Preprocessing ─────────────────────────────────────────────────
+
+preprocessing:
+  resize: [1024, 1024]
+
+  # YOLO models normalize only by pixel_scale — no mean/std subtraction.
+  normalize_mean: null
+  normalize_std: null
+
+  pixel_scale: 255.0
+  channel_order: RGB
+  layout: NCHW
+
+# ── Postprocessing ────────────────────────────────────────────────
+
+postprocessing:
+  # yolo_obb: converts [cx, cy, w, h, conf, cls_id, angle_rad] to
+  # 4-corner polygon in original image coordinates.
+  output_type: yolo_obb
+
+  mask_threshold: 0.5
+  sigmoid: false
+  softmax: false
+
+# ── Thresholds ────────────────────────────────────────────────────
+
+confidence_threshold: 0.5
+nms_threshold: 0.4
+
+# ── Labels ───────────────────────────────────────────────────────
+# DOTAv1 15 classes — must match label names in your CVAT task.
+
+labels:
+  - {id: 0,  name: plane,              color: "#FF3838"}
+  - {id: 1,  name: ship,               color: "#FF9D97"}
+  - {id: 2,  name: storage tank,       color: "#FF701F"}
+  - {id: 3,  name: baseball diamond,   color: "#FFB21D"}
+  - {id: 4,  name: tennis court,       color: "#CFD231"}
+  - {id: 5,  name: basketball court,   color: "#48F90A"}
+  - {id: 6,  name: ground track field, color: "#92CC17"}
+  - {id: 7,  name: harbor,             color: "#3DDB86"}
+  - {id: 8,  name: bridge,             color: "#1A9334"}
+  - {id: 9,  name: large vehicle,      color: "#00D4BB"}
+  - {id: 10, name: small vehicle,      color: "#2C99A8"}
+  - {id: 11, name: helicopter,         color: "#00C2FF"}
+  - {id: 12, name: roundabout,         color: "#344593"}
+  - {id: 13, name: soccer ball field,  color: "#6473FF"}
+  - {id: 14, name: swimming pool,      color: "#0018EC"}
